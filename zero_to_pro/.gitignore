@@ -1,0 +1,20 @@
+node_modules/
+dist/
+
+# IDA databases
+demo/*.id0
+demo/*.id1
+demo/*.id2
+demo/*.nam
+demo/*.til
+demo/*.i64
+demo/*.idb
+
+# Build intermediates
+demo/inner_flag.exe
+demo/challenge_valloc.c
+demo/challenge_packer.py
+
+# OS
+.DS_Store
+Thumbs.db
