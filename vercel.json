@@ -1,0 +1,5 @@
+{
+  "buildCommand": "cd zero_to_pro && npm install && npm run build",
+  "outputDirectory": "zero_to_pro/dist",
+  "framework": null
+}
