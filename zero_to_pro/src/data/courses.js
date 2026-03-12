@@ -517,19 +517,63 @@ u rip L10                   ; désassembler 10 instructions depuis RIP`),
         "<strong>[4]</strong> Ouvrir le binaire dumpé dans IDA → le flag est visible dans la Strings window",
         "<strong>[5]</strong> <code>upx -d</code> comme raccourci — comparer le résultat avec le dump mémoire",
       ]),
+      hr(),
+      h2('Challenge avancé : custom packer + anti-debug'),
+      p("Le binaire <code>crackme_isdbg.exe</code> est un packer <strong>entièrement custom</strong>, beaucoup plus proche de ce qu'on trouve dans de vrais malwares ou protections commerciales."),
+      h3("Ce que l'IAT révèle"),
+      p("Ouvrez le binaire dans IDA / CFF Explorer → onglet Imports. Vous ne verrez que <strong>deux fonctions</strong> :"),
+      list([
+        "<code>GetModuleHandleA</code>",
+        "<code>GetProcAddress</code>",
+      ]),
+      p("Ni <code>VirtualAlloc</code>, ni <code>VirtualProtect</code>, ni <code>IsDebuggerPresent</code> — tout est résolu <em>dynamiquement</em> par le stub via <code>GetProcAddress</code>."),
+      h3('Logique du stub (à retrouver en désassemblage)'),
+      list([
+        "<strong>1.</strong> <code>GetProcAddress(k32, \"IsDebuggerPresent\")</code> → appel → si retour ≠ 0, <code>ExitProcess(0)</code> silencieux.",
+        "<strong>2.</strong> <code>GetProcAddress(k32, \"VirtualAlloc\")</code> → alloue un buffer <code>PAGE_READWRITE</code>.",
+        "<strong>3.</strong> Boucle XOR : déchiffre le shellcode embarqué octet par octet (clé 0x59).",
+        "<strong>4.</strong> <code>GetProcAddress(k32, \"VirtualProtect\")</code> → passe le buffer en <code>PAGE_EXECUTE_READ</code>.",
+        "<strong>5.</strong> <code>CALL rax</code> — saut dans le shellcode déchiffré.",
+      ]),
+      h3('Le shellcode (PEB-walk pur)'),
+      p("Une fois déchiffré, le shellcode ne dépend d'<strong>aucun import</strong> du binaire. Il réalise lui-même :"),
+      list([
+        "PEB walk → <code>InMemoryOrderModuleList[2]</code> → base de <code>kernel32.dll</code>",
+        "Parcours de la table d'exports de kernel32 → <code>GetProcAddress</code>",
+        "<code>GetProcAddress(k32, \"LoadLibraryA\")</code> → charge <code>user32.dll</code>",
+        "Parcours de la table d'exports de user32 → <code>MessageBoxA</code>",
+        "Affiche le flag dans une <code>MessageBoxA</code>",
+      ]),
+      note('success', 'DÉMO LIVE', "L'instructeur ouvre <code>crackme_isdbg.exe</code> dans x64dbg. <strong>(1)</strong> <code>bp GetProcAddress</code> — F9 quatre fois pour observer les quatre résolutions. <strong>(2)</strong> Au premier retour (<code>IsDebuggerPresent</code>) : forcer <code>EAX = 0</code> dans le panneau des registres. <strong>(3)</strong> F9 → VirtualAlloc → boucle XOR visible en mémoire → VirtualProtect → CALL shellcode. <strong>(4)</strong> Entrer dans le shellcode : le PEB-walk est entièrement visible — observer l'accès à <code>GS:[60h]</code>, la traversée des listes de modules, le parsing des exports."),
+      h3('Workflow etudiant'),
+      code('asm', `; 1. Ouvrir crackme_isdbg.exe dans x64dbg
+; 2. Poser un BP sur GetProcAddress
+bp GetProcAddress
+
+; 3. F9 x1 - premier retour = IsDebuggerPresent
+;    Forcer EAX = 0 dans le panneau Registres
+;    (ou patcher le JE/JNZ apres le CALL pour sauter l'exit)
+
+; 4. F9 x3 - VirtualAlloc, VirtualProtect, (ExitProcess non appele)
+;    Observer l'adresse retournee par VirtualAlloc -> region RX
+
+; 5. F7 au CALL rax final -> entrer dans le shellcode
+;    Step dans le PEB-walk, observer le parsing des exports
+
+; 6. MessageBoxA affiche le flag`),
     ],
     exercise: {
-      title: 'Flag caché dans un binaire packé',
+      title: 'Bypass anti-debug : custom packer + shellcode PEB-walk',
       type: 'flag',
-      scenario: "On vous fournit <code>challenge_packer.exe</code> — un binaire Windows packé avec UPX. La commande <code>strings</code> ne révèle pas le flag. À vous de le récupérer.",
-      description: "Dépackez <code>challenge_packer.exe</code> pour récupérer le flag. Utilisez la méthode de votre choix : <code>upx -d</code>, breakpoint VirtualProtect dans x64dbg, ou analyse statique dans IDA.",
-      downloadFile: 'challenge_packer',
+      scenario: "Le binaire <code>crackme_isdbg.exe</code> n'expose presque aucune fonction dans son IAT et se termine silencieusement si un débogueur est détecté. Il déchiffre un shellcode en mémoire, puis ce shellcode résout lui-même ses imports via le PEB pour afficher le flag. À vous de le contourner.",
+      description: "Bypassez la protection <code>IsDebuggerPresent</code>, laissez le stub déchiffrer le shellcode, puis récupérez le flag affiché par la <code>MessageBoxA</code> du shellcode.",
+      downloadFile: 'crackme_isdbg',
       hints: [
-        "Commencez par <code>strings challenge_packer.exe | findstr FLAG</code> — le flag n'apparaît pas. Ensuite, <code>upx -l challenge_packer.exe</code> pour confirmer que c'est UPX.",
-        "La méthode la plus directe : <code>upx -d challenge_packer.exe</code>. Si c'est un UPX standard, le binaire est dépacké et <code>strings</code> révèle le flag.",
-        "En dynamique avec x64dbg : ouvrir le binaire, taper <code>bp VirtualProtect</code> dans la barre de commande, F9, Ctrl+F9, F8 plusieurs fois jusqu'au <code>POPAD</code> suivi d'un <code>JMP</code> — c'est l'OEP. Scylla → Dump.",
+        "Ouvrez le binaire dans IDA ou CFF Explorer → Imports : vous ne verrez que <code>GetModuleHandleA</code> et <code>GetProcAddress</code>. Tout le reste est résolu dynamiquement.",
+        "Dans x64dbg : <code>bp GetProcAddress</code>, F9. Au premier retour, regardez le nom passé en RDX — c'est <code>IsDebuggerPresent</code>. Faites F9 une fois de plus (Ctrl+F9 pour sortir du CALL), puis forcez <code>EAX = 0</code> dans le panneau Registres avant que la branche soit prise.",
+        "Laissez ensuite tourner (F9) — VirtualAlloc alloue le buffer, le stub XOR-déchiffre le shellcode, VirtualProtect le rend exécutable. Au CALL final, F7 pour entrer dans le shellcode et observer le PEB-walk.",
       ],
-      answer: 'FLAG{unpacked_success}',
+      answer: 'zero_to_pro{IsDbg_byp4ss_v4lloc!}',
     },
   },
 ]
