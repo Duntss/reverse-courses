@@ -576,6 +576,558 @@ bp GetProcAddress
       answer: 'zero_to_pro{IsDbg_byp4ss_v4lloc!}',
     },
   },
+
+  // ─────────────────────────────────────────────────────────────
+  // COURS 3
+  // ─────────────────────────────────────────────────────────────
+  {
+    id: 3,
+    title: 'Algorithmes Cryptographiques dans les Malwares',
+    subtitle: 'Identifier RC4, AES, RSA et plus dans IDA Pro',
+    releaseDate: '2026-03-20T17:00:00Z',
+    duration: '90 min + démo live',
+    difficulty: 'Intermédiaire',
+    tags: ['Cryptographie', 'RC4', 'AES', 'RSA', 'WinCrypt', 'Malware Analysis'],
+    content: [
+
+      // ── INTRO ──────────────────────────────────────────────────
+      h2('Pourquoi les malwares utilisent-ils la cryptographie ?'),
+      p("La cryptographie est omniprésente dans les malwares modernes. Elle sert à trois objectifs principaux : <strong>protéger les communications C2</strong> (chiffrer le trafic réseau), <strong>chiffrer les fichiers victimes</strong> (ransomware), et <strong>dissimuler la configuration et le code</strong> (obfuscation de payload, strings chiffrées)."),
+      p("En tant qu'analyste, reconnaître un algorithme cryptographique dans un binaire est une compétence fondamentale — elle permet de comprendre ce que fait le malware, d'extraire des clés, et parfois de décrypter des données volées ou des communications C2."),
+      note('info', 'Trois approches de détection', "1. <strong>API calls</strong> — WinCrypt API (CryptEncrypt, CryptGenKey…)<br>2. <strong>Constantes</strong> — S-boxes, valeurs magiques propres à chaque algorithme<br>3. <strong>Flow / structure</strong> — boucles caractéristiques (ex. SBOX 256 octets pour RC4)"),
+      hr(),
+
+      // ── SECTION 1 : SYMÉTRIQUES ────────────────────────────────
+      h2('Chiffrements Symétriques'),
+      p("Dans un chiffrement symétrique, la même clé sert au chiffrement et au déchiffrement. Les malwares les privilégient pour chiffrer des volumes importants de données (ransomware) ou des streams réseau, car ils sont bien plus rapides que les algorithmes asymétriques."),
+
+      // RC4
+      h3('RC4 — Rivest Cipher 4'),
+      p("<strong>RC4</strong> est un stream cipher extrêmement simple à implémenter (moins de 50 lignes de C), sans dépendances externes. C'est l'un des algorithmes les plus répandus dans les malwares, particulièrement pour chiffrer les communications C2 ou les configurations embarquées."),
+      p("RC4 se décompose en <strong>3 étapes distinctes</strong>, toujours présentes et reconnaissables dans IDA :"),
+      table(
+        ['Étape', 'Nom', 'Description', 'Signature IDA'],
+        [
+          ['1', 'Init SBOX', 'Initialise un tableau S[256] avec S[i] = i (identité 0…255)', 'Boucle for(i=0;i<256;i++) S[i]=i'],
+          ['2', 'KSA', 'Key Scheduling Algorithm — mélange S[] en fonction de la clé', 'Boucle 256 iters avec S[i] ↔ S[j] swap, j += key[i % keylen]'],
+          ['3', 'PRGA', 'Pseudo-Random Generation Algorithm — génère le keystream, XOR avec les données', 'Boucle sur les données, double swap S[i] ↔ S[j], XOR avec S[(S[i]+S[j])&0xFF]'],
+        ]
+      ),
+      note('warning', 'Signature caractéristique', "La présence d'un tableau local de <strong>256 octets initialisé avec la séquence 0…255</strong> (boucle mov byte ptr [rbp+rax], al) est quasi-certaine d'être une SBOX RC4. Le KSA qui suit avec une clé confirme le diagnostic."),
+      p("Voici le code source commenté des 3 étapes :"),
+      code('c', `/* Étape 1 : Init SBOX */
+void rc4_init_sbox(RC4_CTX *ctx) {
+    for (int i = 0; i < 256; i++)
+        ctx->S[i] = (unsigned char)i;  // S = [0, 1, 2, ..., 255]
+}
+
+/* Étape 2 : KSA (Key Scheduling Algorithm) */
+void rc4_ksa(RC4_CTX *ctx, const unsigned char *key, int keylen) {
+    int j = 0;
+    unsigned char tmp;
+    for (int i = 0; i < 256; i++) {
+        j = (j + ctx->S[i] + key[i % keylen]) & 0xFF;
+        tmp = ctx->S[i]; ctx->S[i] = ctx->S[j]; ctx->S[j] = tmp;  // swap
+    }
+}
+
+/* Étape 3 : PRGA (Pseudo-Random Generation Algorithm) */
+void rc4_prga(RC4_CTX *ctx, unsigned char *data, int datalen) {
+    int i = 0, j = 0;
+    unsigned char tmp;
+    for (int k = 0; k < datalen; k++) {
+        i = (i + 1) & 0xFF;
+        j = (j + ctx->S[i]) & 0xFF;
+        tmp = ctx->S[i]; ctx->S[i] = ctx->S[j]; ctx->S[j] = tmp;  // swap
+        data[k] ^= ctx->S[(ctx->S[i] + ctx->S[j]) & 0xFF];         // XOR
+    }
+}`),
+      p("Dans le pseudocode Hex-Rays, la boucle PRGA est immédiatement reconnaissable par le double swap suivi d'un XOR avec une indexation à deux niveaux dans S[]."),
+      table(
+        ['Famille de malware', 'Usage de RC4'],
+        [
+          ['Mirai (botnet IoT)', 'Chiffrement des communications C2 (port 48101)'],
+          ['Carbanak (APT financier)', 'Chiffrement du trafic C2 et des modules téléchargés'],
+          ['APT28 / Fancy Bear', 'Chiffrement des configs et des données exfiltrées (outil X-Agent)'],
+          ['ZLoader (banking trojan)', 'Déchiffrement des modules embarqués au runtime'],
+          ['WannaCry', 'Chiffrement de la configuration interne (URL .onion)'],
+        ]
+      ),
+
+      hr(),
+
+      // AES
+      h3('AES — Advanced Encryption Standard'),
+      p("<strong>AES</strong> (Rijndael) est le standard de chiffrement symétrique par blocs le plus utilisé aujourd'hui. Les ransomwares modernes l'utilisent massivement (AES-128 ou AES-256) pour chiffrer les fichiers, souvent en combinaison avec RSA pour protéger la clé AES."),
+      p("AES est reconnaissable à <strong>deux constantes emblématiques</strong> :"),
+      table(
+        ['Constante', 'Valeur', 'Rôle'],
+        [
+          ['S-box[0]', '0x63', 'Premier octet de la S-box de substitution — toujours 0x63 dans toute implémentation AES'],
+          ['Rcon[1]', '0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1B, 0x36', 'Table de constantes pour le Key Schedule (Round Constants)'],
+          ['MixColumns', 'Multiplications dans GF(2⁸) avec polynôme 0x11B', 'Transformée MixColumns visible dans le décompilateur comme des XOR complexes'],
+        ]
+      ),
+      note('success', 'findcrypt / CAPA', "Le plugin <strong>findcrypt</strong> dans IDA détecte automatiquement la S-box AES. Cherchez aussi avec CAPA la capacité <code>encrypt data using AES via WinAPI</code>."),
+      code('text', `AES S-box (16 premiers octets) :
+63 7C 77 7B F2 6B 6F C5  30 01 67 2B FE D7 AB 76
+
+Rcon (table de constantes Round) :
+01 02 04 08 10 20 40 80  1B 36`),
+      table(
+        ['Famille', 'Variante AES', 'Usage'],
+        [
+          ['REvil / Sodinokibi', 'AES-256-CBC', 'Chiffrement des fichiers + Salsa20 pour les gros fichiers'],
+          ['LockBit 2.0 / 3.0', 'AES-128', 'Chiffrement multi-threadé ultra-rapide'],
+          ['Ryuk', 'AES-256', 'Chiffrement par volume (serveurs, NAS)'],
+          ['Conti', 'AES-256', 'Pipeline chiffrement parallèle avec I/O Completion Ports'],
+          ['BlackCat / ALPHV', 'AES-128-CTR + ChaCha20', 'Ransomware en Rust, dual cipher selon taille fichier'],
+        ]
+      ),
+      p("Exemple de pattern AES dans un implémentation manuelle (sans AES-NI) — ce que vous voyez dans Hex-Rays :"),
+      code('c', `/* La S-box AES (256 octets) est en .rdata — premier octet toujours 0x63 */
+static const uint8_t aes_sbox[256] = {
+    0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5,
+    0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
+    /* ... 240 autres octets identiques dans toute implémentation AES ... */
+};
+
+/* SubBytes — lookup table → pattern Hex-Rays : v5 = aes_sbox[v4] */
+uint8_t SubBytes(uint8_t b) { return aes_sbox[b]; }
+
+/* MixColumns — multiplications dans GF(2^8) avec polynôme 0x11B
+   Pattern Hex-Rays : XOR imbriqués avec des shifts et des tests de bit */
+uint8_t gf_mul(uint8_t a, uint8_t b) {
+    uint8_t p = 0;
+    for (int i = 0; i < 8; i++) {
+        if (b & 1) p ^= a;
+        int carry = a & 0x80;
+        a <<= 1;
+        if (carry) a ^= 0x1B;  /* 0x1B = polynôme irréductible de GF(2^8) */
+        b >>= 1;
+    }
+    return p;
+}`),
+
+      hr(),
+
+      // 3DES
+      h3('3DES — Triple DES'),
+      p("<strong>3DES</strong> applique l'algorithme DES trois fois consécutivement (Encrypt-Decrypt-Encrypt avec 3 clés de 56 bits). Bien que vieillissant et lent, il reste présent dans les malwares qui ciblent des environnements legacy ou qui réutilisent du code ancien."),
+      p("DES est reconnaissable à ses <strong>tables de permutation</strong> fixes, notamment la <em>Initial Permutation (IP)</em> et la <em>S-box DES</em> (8 S-boxes de 64 entrées 6→4 bits)."),
+      code('text', `DES S-box 1 (premières valeurs) :
+14  4 13  1  2 15 11  8  3 10  6 12  5  9  0  7
+ 0 15  7  4 14  2 13  1 10  6 12 11  9  5  3  8`),
+      table(
+        ['Famille', 'Usage'],
+        [
+          ['Qakbot (versions pré-2020)', 'Chiffrement des communications C2 avec 3DES-CBC'],
+          ['Dridex (anciennes variantes)', 'Protection de la configuration réseau'],
+          ['Trojans bancaires ciblant AS/400', 'Compatibilité avec les systèmes mainframe legacy'],
+        ]
+      ),
+      p("Usage typique via WinCrypt — pattern visible dans IDA Imports :"),
+      code('c', `/* 3DES via WinCrypt — CALG_3DES = 0x6603 */
+HCRYPTPROV hProv; HCRYPTKEY hKey; HCRYPTHASH hHash;
+
+/* Étape 1 : acquérir le CSP */
+CryptAcquireContextA(&hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT);
+
+/* Étape 2 : hasher la clé (MD5 ou SHA-1) */
+CryptCreateHash(hProv, CALG_MD5, 0, 0, &hHash);   /* CALG_MD5 = 0x8003 */
+CryptHashData(hHash, (BYTE *)key, key_len, 0);
+
+/* Étape 3 : dériver la clé 3DES — CALG_3DES = 0x6603 visible en push imm32 */
+CryptDeriveKey(hProv, CALG_3DES, hHash, 0, &hKey);
+
+/* Étape 4 : chiffrer */
+CryptEncrypt(hKey, 0, TRUE, 0, data, &data_len, buf_size);`),
+
+      hr(),
+
+      // RC5
+      h3('RC5'),
+      p("<strong>RC5</strong> est un chiffrement par blocs paramétrable (taille bloc, nombre de rounds, taille clé). Sa version la plus courante dans les malwares est RC5-32/12/16. Il se distingue par l'usage intensif de <strong>rotations (ROL/ROR)</strong> et de <strong>deux constantes magiques</strong> dérivées de e et φ."),
+      code('c', `/* Constantes magiques RC5 (version 32 bits) */
+#define P32  0xB7E15163UL   /* Dérivé de (e-2) × 2^32 */
+#define Q32  0x9E3779B9UL   /* Dérivé de (φ-1) × 2^32 — aussi dans AES KeyExp! */
+
+/* Key expansion RC5 */
+for (int i = 0; i < t; i++) {
+    A = S[i] = ROL(S[i] + A + B, 3);
+    B = L[j] = ROL(L[j] + A + B, A + B);
+}`),
+      note('info', 'Q32 = 0x9E3779B9', "Cette constante apparaît aussi dans AES KeyExpansion et dans les hash-maps (Knuth multiplicative hashing). Si vous la voyez seule, ne concluez pas RC5 directement — cherchez P32 = 0xB7E15163 pour confirmer."),
+      table(
+        ['Famille', 'Usage'],
+        [
+          ['Locky (variantes 2016)', 'Chiffrement des fichiers en RC5 + RSA'],
+          ['Kelihos (spam botnet)', 'Chiffrement des communications C2'],
+        ]
+      ),
+
+      hr(),
+
+      // Serpent
+      h3('Serpent'),
+      p("<strong>Serpent</strong> était finaliste de l'appel AES (2000). Bien que moins répandu qu'AES, il apparaît dans certains malwares sophistiqués, notamment des outils de surveillance commerciaux. Il utilise <strong>32 rounds</strong> (contre 10/12/14 pour AES) avec 8 S-boxes de 4 bits."),
+      table(
+        ['Famille', 'Usage'],
+        [
+          ['FinFisher / FinSpy (surveillance commerciale)', 'Chiffrement des modules et des communications'],
+          ['BitPaymer ransomware', 'Chiffrement des fichiers en Serpent'],
+        ]
+      ),
+      note('warning', 'Détection', "Serpent est rare — si findcrypt le détecte, il s'agit probablement d'un malware ciblé / nation-state. Les 8 S-boxes (tableaux de 16 entrées 4 bits) sont visibles dans la section .data ou en inline."),
+
+      hr(),
+
+      // Salsa20 / ChaCha20
+      h3('Salsa20 / ChaCha20'),
+      p("<strong>Salsa20</strong> et sa variante <strong>ChaCha20</strong> sont des stream ciphers modernes, très rapides, avec une propriété remarquable : leur constante d'initialisation est une chaîne ASCII lisible en clair."),
+      code('text', `Constante "magic" Salsa20 / ChaCha20 (32 bytes key) :
+ASCII : "expand 32-byte k"
+Hex   :  65 78 70 61  6E 64 20 33  32 2D 62 79  74 65 20 6B
+
+Visible en clair dans les strings IDA ou dans la vue Hex !`),
+      p("Le quarter-round (opération de base de Salsa20/ChaCha20) combine ADD + XOR + ROT, toujours dans cet ordre, ce qui crée un pattern de décompilation reconnaissable."),
+      table(
+        ['Famille', 'Usage'],
+        [
+          ['Thanos ransomware', 'Chiffrement des fichiers en ChaCha20 + RSA'],
+          ['NightSky ransomware', 'ChaCha20 pour les communications C2'],
+          ['REvil (gros fichiers)', 'Salsa20 pour les fichiers > quelques Mo (plus rapide qu\'AES)'],
+        ]
+      ),
+      p("Implémentation du quarter-round — pattern caractéristique visible dans Hex-Rays (séquence ADD + XOR + ROT invariable) :"),
+      code('c', `#define ROTL(v, n) (((v) << (n)) | ((v) >> (32-(n))))
+
+/* Quarter-round Salsa20 : ADD + XOR + ROT — toujours dans cet ordre */
+/* Dans IDA/Hex-Rays : séquence de __ROL4__ ou (v << n | v >> (32-n)) */
+#define QR(a, b, c, d)          \\
+    b ^= ROTL(a + d,  7);       \\
+    c ^= ROTL(b + a,  9);       \\
+    d ^= ROTL(c + b, 13);       \\
+    a ^= ROTL(d + c, 18);
+
+/* Bloc Salsa20 : état de 16 uint32 (64 octets), 10 double-rounds */
+void salsa20_block(uint32_t out[16], const uint32_t in[16]) {
+    uint32_t x[16];
+    for (int i = 0; i < 16; i++) x[i] = in[i];
+
+    for (int i = 0; i < 10; i++) {        /* 20 demi-rounds = Salsa20/20 */
+        QR(x[ 0], x[ 4], x[ 8], x[12]); /* colonne 0 */
+        QR(x[ 5], x[ 9], x[13], x[ 1]); /* colonne 1 */
+        QR(x[10], x[14], x[ 2], x[ 6]); /* colonne 2 */
+        QR(x[15], x[ 3], x[ 7], x[11]); /* colonne 3 */
+        QR(x[ 0], x[ 1], x[ 2], x[ 3]); /* ligne 0 */
+        QR(x[ 5], x[ 6], x[ 7], x[ 4]); /* ligne 1 */
+        QR(x[10], x[11], x[ 8], x[ 9]); /* ligne 2 */
+        QR(x[15], x[12], x[13], x[14]); /* ligne 3 */
+    }
+    for (int i = 0; i < 16; i++) out[i] = x[i] + in[i]; /* add-back final */
+}
+
+/* État initial — les 4 constantes sigma sont visibles dans IDA strings :
+   x[0]=0x61707865, x[5]=0x3320646e, x[10]=0x79622d32, x[15]=0x6b206574
+   → "expa" "nd 3" "2-by" "te k" = "expand 32-byte k"               */`),
+
+      hr(),
+
+      // MISTY-1
+      h3('MISTY-1 — Algorithme rare'),
+      p("<strong>MISTY-1</strong> est un algorithme japonais développé par Mitsubishi Electric en 1995. Il est extrêmement rare dans les malwares, mais a été observé dans des outils d'espionnage attribués à des groupes APT asiatiques. Il utilise un réseau de Feistel à 8 rounds avec des fonctions FL/FO/FI imbriquées."),
+      note('info', 'Pourquoi le mentionner ?', "Sa rareté en fait un indicateur fort de malware sophistiqué/nation-state si vous le détectez. Le plugin findcrypt le reconnaît grâce aux tables de substitution SP7/SP9 qui lui sont propres."),
+
+      hr(),
+
+      // ── SECTION 2 : ASYMÉTRIQUES ──────────────────────────────
+      h2('Chiffrements Asymétriques'),
+      p("Les chiffrements asymétriques utilisent une paire de clés (publique/privée). Dans les malwares, ils ne chiffrent <strong>jamais</strong> des volumes importants de données (trop lents) — ils servent exclusivement à <strong>protéger la clé symétrique</strong>. Le schéma classique ransomware est : <em>AES/ChaCha20 chiffre les fichiers, RSA/ECDH chiffre la clé AES</em>."),
+
+      // RSA
+      h3('RSA'),
+      p("RSA est le standard pour l'échange de clés dans les ransomwares. La clé publique de l'attaquant est embarquée dans le malware (ou téléchargée depuis le C2). Elle chiffre la clé AES générée localement. Sans la clé privée de l'attaquant, déchiffrement impossible."),
+      p("Indicateurs dans IDA/WinCrypt :"),
+      list([
+        "<code>CryptGenKey(hProv, AT_KEYEXCHANGE, ...)</code> — génération de la paire RSA locale",
+        "<code>CryptImportKey</code> — import de la clé publique de l'attaquant",
+        "<code>CryptEncrypt</code> avec un handle provenant d'une clé RSA (PROV_RSA_FULL ou PROV_RSA_AES)",
+        "Blob de clé publique (PUBLICKEYBLOB) en dur dans la section .data",
+      ]),
+      table(
+        ['Famille', 'Schéma RSA'],
+        [
+          ['WannaCry', 'RSA-2048 (clé publique embedded) → chiffre la clé AES-128 par fichier'],
+          ['Ryuk', 'RSA-2048 via CryptAPI, clé publique téléchargée depuis C2'],
+          ['REvil / Sodinokibi', 'Courbe elliptique Curve25519 + RSA selon les variantes'],
+          ['Locky', 'RSA-2048 pour protéger la clé RC4 de chiffrement'],
+        ]
+      ),
+
+      hr(),
+
+      // ECDH
+      h3('ECDH — Elliptic Curve Diffie-Hellman'),
+      p("<strong>ECDH</strong> offre le même niveau de sécurité que RSA avec des clés bien plus courtes (256 bits ECDH ≈ 3072 bits RSA). Les ransomwares modernes migrent vers ECDH pour cette efficacité."),
+      p("Sur Windows, ECDH se fait via <strong>BCrypt</strong> (CNG — Cryptography Next Generation) et non WinCrypt :"),
+      code('c', `// Indicateurs BCrypt pour ECDH
+BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_ECDH_P256_ALGORITHM, NULL, 0);
+BCryptGenerateKeyPair(hAlg, &hKey, 256, 0);
+BCryptFinalizeKeyPair(hKey, 0);
+BCryptSecretAgreement(hKey, hPeerKey, &hSecret, 0);`),
+      table(
+        ['Famille', 'Courbe'],
+        [
+          ['Babuk ransomware', 'ECDH Curve25519 + HC-128 stream cipher'],
+          ['BlackMatter / DarkSide', 'ECDH P-256 via BCrypt'],
+          ['Hive ransomware', 'Curve25519 — génère une clé unique par fichier'],
+        ]
+      ),
+
+      hr(),
+
+      // ── SECTION 3 : WINCRYPT API ──────────────────────────────
+      h2('Détection via la WinCrypt API'),
+      p("Quand un malware délègue le chiffrement à l'OS via la <strong>WinCrypt API</strong> (aussi appelée <em>Crypto Service Provider — CSP</em>), ses imports deviennent des indicateurs directs de l'algorithme utilisé."),
+      note('info', 'Où regarder dans IDA ?', "Onglet <strong>Imports</strong> : filtrez sur <code>Crypt</code>. Les fonctions WinCrypt sont dans <code>advapi32.dll</code>. BCrypt (CNG) est dans <code>bcrypt.dll</code>."),
+
+      p("Les fonctions clés et ce qu'elles révèlent :"),
+      table(
+        ['Fonction', 'Rôle', 'Ce que ça révèle'],
+        [
+          ['CryptAcquireContext', 'Obtient un handle vers un CSP', 'Type de provider (PROV_RSA_AES, PROV_RSA_FULL…)'],
+          ['CryptCreateHash', 'Crée un objet de hash', 'Algorithme de hash via ALG_ID (CALG_SHA_256, CALG_MD5…)'],
+          ['CryptHashData', 'Hash des données', 'La clé de dérivation ou le payload haché'],
+          ['CryptDeriveKey', 'Dérive une clé symétrique depuis un hash', 'Algorithme symétrique via ALG_ID'],
+          ['CryptGenKey', 'Génère une clé (aléatoire ou asymétrique)', '<strong>ALG_ID directement — voir tableau ci-dessous</strong>'],
+          ['CryptEncrypt', 'Chiffre des données', 'Présence de chiffrement, taille de bloc via le padding'],
+          ['CryptDecrypt', 'Déchiffre des données', 'Déchiffrement au runtime (config, payload)'],
+          ['CryptImportKey', 'Importe une clé depuis un blob', 'Clé publique RSA embedded dans le binaire'],
+        ]
+      ),
+
+      h3('CryptGenKey — ALG_ID'),
+      p('La valeur <code>AlgId</code> passée à <a href="https://learn.microsoft.com/en-us/windows/win32/api/wincrypt/nf-wincrypt-cryptgenkey" target="_blank" rel="noopener"><strong>CryptGenKey</strong></a> identifie directement l\'algorithme. Elle est visible en clair dans le décompilateur Hex-Rays comme une constante numérique.'),
+      table(
+        ['ALG_ID (hex)', 'Constante', 'Algorithme'],
+        [
+          ['0x6601', 'CALG_DES', 'DES 56-bit'],
+          ['0x6603', 'CALG_3DES', '3DES (Triple DES)'],
+          ['0x6602', 'CALG_RC2', 'RC2'],
+          ['0x6801', 'CALG_RC4', 'RC4'],
+          ['0x6802', 'CALG_RC5', 'RC5'],
+          ['0x660E', 'CALG_AES_128', 'AES-128'],
+          ['0x660F', 'CALG_AES_192', 'AES-192'],
+          ['0x6610', 'CALG_AES_256', 'AES-256'],
+          ['0x8004', 'CALG_SHA_256', 'SHA-256 (hash)'],
+          ['0x8003', 'CALG_MD5', 'MD5 (hash)'],
+          ['0xA400', 'AT_KEYEXCHANGE', 'RSA (échange de clé / chiffrement)'],
+          ['0x2400', 'AT_SIGNATURE', 'RSA (signature)'],
+        ]
+      ),
+      note('warning', 'ALG_ID comme IOC', "Dans le décompilateur Hex-Rays, <code>CryptGenKey(hProv, 0x6610, ...)</code> identifie AES-256 sans ambiguïté. Ajoutez ces valeurs à votre YARA rule comme indicateurs de capacité de chiffrement."),
+
+      p("Séquence typique dans un malware utilisant AES via WinCrypt — visible dans le décompilateur :"),
+      code('c', `// Pattern typique : dérivation de clé AES depuis un mot de passe
+CryptAcquireContextA(&hProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT);
+CryptCreateHash(hProv, CALG_SHA_256, 0, 0, &hHash);  // 0x8004
+CryptHashData(hHash, password, passlen, 0);
+CryptDeriveKey(hProv, CALG_AES_256, hHash, 0, &hKey); // 0x6610 → AES-256 !
+CryptEncrypt(hKey, 0, TRUE, 0, data, &dataLen, bufLen);`),
+
+      hr(),
+
+      // ── SECTION 4 : CONSTANTES ────────────────────────────────
+      h2('Détection par Constantes'),
+      p("Chaque algorithme embarque des constantes mathématiques fixes dans son implémentation. Ces constantes sont <strong>des empreintes digitales</strong> visibles dans la section <code>.data</code>, <code>.rdata</code>, ou inline dans le code."),
+
+      h3('AES — S-box et Rcon'),
+      code('text', `/* AES S-box — 32 premiers octets (toujours identiques) */
+63 7C 77 7B F2 6B 6F C5 30 01 67 2B FE D7 AB 76
+CA 82 C9 7D FA 59 47 F0 AD D4 A2 AF 9C A4 72 C0
+
+/* Rcon — Round Constants pour le Key Schedule */
+01 02 04 08 10 20 40 80 1B 36`),
+      note('success', 'findcrypt dans IDA', "Le plugin <strong>findcrypt</strong> (disponible sur HexRays plugin manager) scanne le binaire pour ces séquences et annote automatiquement les fonctions crypto détectées."),
+
+      h3('SHA-256 — Constantes K'),
+      code('text', `/* SHA-256 — 64 constantes K (premières valeurs) */
+428A2F98 71374491 B5C0FBCF E9B5DBA5
+3956C25B 59F111F1 923F82A4 AB1C5ED5
+
+Ces DWORD sont visibles dans IDA dans la section .rdata ou en push imm32 inline.`),
+
+      h3('RC5 — Constantes P32 / Q32'),
+      code('c', `#define P32  0xB7E15163   // (e  - 2) × 2^32, e = base logarithme naturel
+#define Q32  0x9E3779B9   // (φ - 1) × 2^32, φ = nombre d'or`),
+
+      h3('Salsa20 / ChaCha20 — Constante ASCII'),
+      code('text', `/* Chaîne ASCII visible dans les strings IDA */
+"expand 32-byte k"   ← pour une clé 256-bit
+"expand 16-byte k"   ← pour une clé 128-bit
+
+Hex : 65 78 70 61 6E 64 20 33 32 2D 62 79 74 65 20 6B`),
+
+      hr(),
+
+      // ── SECTION 5 : FLOW ──────────────────────────────────────
+      h2('Détection par Flow / Structure'),
+      p("Même sans constantes numériques, certains algorithmes laissent une empreinte dans leur structure de contrôle (boucles, compteurs, opérations)."),
+
+      h3('RC4 — Pattern SBOX'),
+      p("La séquence de patterns pour confirmer RC4 dans IDA :"),
+      list([
+        "<strong>Pattern 1 (Init)</strong> — Boucle <code>for(i=0;i&lt;256;i++) S[i]=i</code> → tableau alloué sur la pile ou en .bss, 256 octets",
+        "<strong>Pattern 2 (KSA)</strong> — Boucle 256 iters avec <code>j = (j + S[i] + key[i%keylen]) & 0xFF</code> puis deux mov pour swap",
+        "<strong>Pattern 3 (PRGA)</strong> — Boucle sur len(data) avec swap + XOR indirect <code>S[(S[i]+S[j])&0xFF]</code>",
+      ]),
+      code('text', `Vue Graph IDA — RC4 KSA (schéma typique) :
+
+[init: i=0, j=0]
+       │
+       ▼
+[block: j += S[i] + key[i%len]]  ←─┐
+[swap S[i] ↔ S[j]]                  │
+[i++]                                │
+[i < 256 ?] ──YES───────────────────┘
+       │ NO
+       ▼
+[PRGA loop]`),
+
+      h3('AES — SubBytes lookup'),
+      p("Dans une implémentation manuelle d'AES (sans AES-NI), la fonction <code>SubBytes</code> est une lookup table dans la S-box. Le pattern dans Hex-Rays ressemble à :"),
+      code('c', `// SubBytes — accès indirect dans sbox[256]
+uint8_t SubBytes(uint8_t byte) {
+    return sbox[byte];  // sbox est la table de 256 octets
+}
+// Dans le décompilateur : v5 = *((_BYTE *)&sbox + v4)`),
+
+      h3('Outils d\'analyse automatique'),
+      table(
+        ['Outil', 'Type', 'Algorithmes détectés', 'Usage'],
+        [
+          ['findcrypt (IDA plugin)', 'Constantes', 'AES, DES, RC4, SHA, MD5, Serpent, Camellia…', 'Plugin IDA — annoter les fonctions'],
+          ['CAPA (mandiant)', 'Règles CAPA', 'Capacités crypto + autres behaviors', 'CLI : capa.exe malware.exe'],
+          ['YARA', 'Regex/bytes', 'Toute constante personnalisée', 'Règles custom sur S-boxes, magic values'],
+          ['CyberChef', 'Déchiffrement', 'RC4, AES, XOR, Base64…', 'Déchiffrement rapide une fois la clé trouvée'],
+          ['detect-it-easy (DIE)', 'Entropy / signatures', 'Packer, crypto libs (OpenSSL, mbedTLS)', 'Avant l\'analyse statique'],
+        ]
+      ),
+
+      hr(),
+
+      // ── SECTION 6 : RETENIR ───────────────────────────────────
+      h2('Ce qu\'il faut retenir pour IDA'),
+      p("En pratique, vous ne reconnaîtrez jamais un algorithme sur un seul indice. La méthode fiable est de <strong>combiner plusieurs patterns</strong> pour confirmer le diagnostic avant de conclure."),
+
+      h3('RC4 — Les 3 patterns combinés'),
+      note('warning', 'Signature la plus fiable en pratique', "La combinaison des 3 patterns ci-dessous est <strong>quasi-certaine d'identifier RC4</strong>, même sur un binaire strippé, obfusqué ou compilé avec des optimisations agressives."),
+      table(
+        ['Étape', 'Pattern ASM (x64)', 'Pattern Hex-Rays (F5)', 'Ce qui confirme RC4'],
+        [
+          ['Init S-Box', '<code>mov byte ptr [rbp+rax], al</code> en boucle 256 itérations', '<code>for(i=0;i&lt;256;i++) S[i]=i;</code>', 'Boucle compteur fixe = 256, octet = index — tableau sur la pile ou .bss'],
+          ['KSA', '<code>xchg</code> ou double <code>mov</code> entre deux positions du tableau S[]', '<code>j=(j+S[i]+key[i%len])&0xFF; tmp=S[i]; S[i]=S[j]; S[j]=tmp;</code>', 'Swap de deux éléments dans S[] + indexation par la clé'],
+          ['PRGA', 'Double swap + <code>xor</code> avec index indirect (<code>S[S[i]+S[j]]</code>)', '<code>data[k]^=S[(S[i]+S[j])&0xFF];</code>', 'XOR à double indexation dans S[] — signature unique à RC4'],
+        ]
+      ),
+      code('text', `Checklist de confirmation RC4 dans IDA :
+
+[✓] Tableau de 256 octets alloué sur la pile (rbp-0x108 typiquement)
+[✓] Boucle 1 : mov byte ptr [rbp+rax], al  — compteur 0→255
+[✓] Boucle 2 : swap via xchg ou 2x mov     — même tableau, 256 iters
+[✓] Boucle 3 : XOR avec accès indirect S[S[i]+S[j]] — sur les données
+
+Si les 4 cases sont cochées → RC4 confirmé à 99%
+La clé est passée en argument de la fonction Boucle 2 (KSA).`),
+
+      h3('Tableau de synthèse — Signatures rapides'),
+      table(
+        ['Algorithme', 'Signature principale', 'Constante/Valeur magique', 'Outil de détection'],
+        [
+          ['RC4', 'Tableau 256 octets + boucle swap', 'Aucune — détection par structure', 'Analyse manuelle ou findcrypt'],
+          ['AES', 'S-box 256 octets dans .rdata', '0x63 (premier octet S-box)', 'findcrypt, CAPA'],
+          ['RC5', 'ROL/ROR intenses + key schedule', 'P32=0xB7E15163 Q32=0x9E3779B9', 'findcrypt, recherche hex'],
+          ['3DES', 'Import CryptDeriveKey', 'CALG_3DES = 0x6603 en push imm32', 'IDA Imports tab'],
+          ['Salsa20/ChaCha20', 'QR macro : ADD+XOR+ROT×4', '"expand 32-byte k" dans strings', 'IDA Strings view'],
+          ['RSA', 'Import CryptGenKey(AT_KEYEXCHANGE)', 'AT_KEYEXCHANGE = 0x1', 'IDA Imports tab'],
+          ['ECDH', 'Import BCryptOpenAlgorithmProvider', 'String L"ECDH_P256" dans .rdata', 'IDA Strings / Imports'],
+        ]
+      ),
+
+      hr(),
+
+      // ── SECTION 7 : DEMO BINAIRE ──────────────────────────────
+      h2('Démo — demo_crypto.exe'),
+      p("Le binaire <strong>demo_crypto.exe</strong> illustre les deux approches de détection dans un même programme. Voici les éléments à retrouver :"),
+
+      h3('Ce que contient le binaire'),
+      table(
+        ['Composant', 'Emplacement dans IDA', 'Ce qu\'il illustre'],
+        [
+          ['rc4_init_sbox()', 'Fonction visible dans la liste Functions', 'Étape 1 : boucle 256 iters, S[i]=i'],
+          ['rc4_ksa()', 'Appelée après rc4_init_sbox', 'Étape 2 : KSA avec clé "Z2P_K3Y"'],
+          ['rc4_prga()', 'Appelée avant printf du flag', 'Étape 3 : PRGA + XOR sur encrypted_flag[]'],
+          ['aes_demo()', 'Imports : CryptCreateHash + CryptDeriveKey', 'Détection WinCrypt : CALG_AES_256 = 0x6610'],
+          ['rsa_demo()', 'Imports : CryptGenKey(AT_KEYEXCHANGE)', 'Détection WinCrypt : AT_KEYEXCHANGE = 0x1'],
+          ['encrypted_flag[]', 'Tableau de 35 octets dans .rdata', 'Flag chiffré RC4 — à déchiffrer'],
+        ]
+      ),
+
+      h3('Workflow d\'analyse'),
+      list([
+        "<strong>IDA → Imports</strong> : identifiez <code>CryptCreateHash</code>, <code>CryptDeriveKey</code>, <code>CryptGenKey</code>. Notez la constante ALG_ID passée à <code>CryptDeriveKey</code> (2e arg) — c'est <code>0x6610</code> = AES-256.",
+        "<strong>IDA → Functions</strong> : le binaire est strippé, les fonctions s'appellent <code>sub_XXXXXXXX</code>. Parcourez les courtes fonctions. Cherchez une boucle <code>for(i=0;i&lt;256;i++)</code> avec <code>S[i]=i</code> — c'est l'Init SBOX (étape 1).",
+        "<strong>Étape 2 — KSA</strong> : la fonction appelée juste après l'Init SBOX contient une boucle 256 iters avec un swap et une indexation par la clé. Notez son adresse dans la barre d'adresse IDA — c'est la réponse.",
+        "<strong>Étape 3 — PRGA</strong> : la 3e fonction RC4 opère sur les données et fait un XOR avec un double index dans S[]. Vérifiez les XREF depuis <code>main()</code> pour confirmer l'ordre d'appel des 3 étapes.",
+        "<strong>WinCrypt</strong> : explorez <code>aes_demo()</code> et <code>rsa_demo()</code> via leurs XREF depuis les imports — identifiez <code>CALG_AES_256 = 0x6610</code> et <code>AT_KEYEXCHANGE = 0x1</code> dans le décompilateur.",
+      ], true),
+
+      note('warning', 'Compiler les binaires', `Depuis le dossier <code>demo/</code> :<br>
+<code>gcc -O1 -s -o demo_crypto.exe demo_crypto.c -ladvapi32</code><br>
+<code>gcc -O1 -s -o demo_crypto_full.exe demo_crypto_full.c -ladvapi32</code><br>
+<code>gcc -O1 -s -o exam_crypto.exe exam_crypto.c</code><br><br>
+<strong>demo_crypto_full.exe</strong> — binaire de référence du cours (RC4 + RC5 + Salsa20 + AES + 3DES + RSA commentés).<br>
+<strong>demo_crypto.exe</strong> — démo RC4 + WinCrypt AES/RSA.<br>
+<strong>exam_crypto.exe</strong> — binaire d'examen : strippé, sans output, sans strings. 5 questions à résoudre dans IDA.`),
+
+    ],
+
+    exercise: {
+      type: 'multi',
+      title: 'Examen — Identifier RC4, RC5 et RSA dans exam_crypto.exe',
+      scenario: "Un analyste vous soumet un binaire suspect récupéré sur un poste compromis. Le programme ne produit aucune sortie — il s'exécute silencieusement. Votre mission : ouvrir le binaire dans IDA Pro et répondre aux 5 questions suivantes en retrouvant les adresses statiques.",
+      description: "Ouvrez <strong>exam_crypto.exe</strong> dans IDA Pro. Le binaire est strippé, sans symboles, sans strings visibles. Il contient RC4 (3 étapes manuelles), RC5 (constantes P32/Q32 en .data) et une clé publique RSA embarquée en .rdata.<br><br>Format attendu : <code>0x14000XXXXX</code> — adresse statique telle qu'affichée dans IDA (image base <code>0x140000000</code>). Accepté avec ou sans préfixe <code>0x</code>, insensible à la casse.",
+      downloadFile: 'exam_crypto',
+      questions: [
+        {
+          id: 'q1',
+          label: 'Q1 — RC4 Étape 1 : Adresse de la fonction <strong>Init SBOX</strong> (boucle S[i]=i sur 256 itérations)',
+          answer: '0x1400016d0',
+        },
+        {
+          id: 'q2',
+          label: 'Q2 — RC4 Étape 2 : Adresse de la fonction <strong>KSA</strong> (Key Scheduling Algorithm — boucle swap avec la clé)',
+          answer: '0x1400016f9',
+        },
+        {
+          id: 'q3',
+          label: 'Q3 — RC4 Étape 3 : Adresse de la fonction <strong>PRGA</strong> (double swap + XOR indirect sur les données)',
+          answer: '0x140001745',
+        },
+        {
+          id: 'q4',
+          label: 'Q4 — RC5 : Adresse du tableau <code>rc5_magic[]</code> contenant <strong>P32 = 0xB7E15163</strong> (section .data)',
+          answer: '0x140004010',
+        },
+        {
+          id: 'q5',
+          label: 'Q5 — RSA : Adresse du blob de clé publique RSA (magic <strong>0x31415352</strong> = "RSA1", section .rdata)',
+          answer: '0x140005060',
+        },
+      ],
+    },
+  },
 ]
 
 export default courses

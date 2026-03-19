@@ -24,14 +24,7 @@ export default function App() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(progress))
   }, [progress])
 
-  // A course is accessible if its release date has passed AND the previous exercise is done
   function getCourseStatus(course) {
-    const now = new Date()
-    const released = now >= new Date(course.releaseDate)
-    const prevDone = course.id === 1 || progress.completedExercises.includes(course.id - 1)
-
-    if (!released) return 'time-locked'
-    if (!prevDone) return 'exercise-locked'
     if (progress.completedExercises.includes(course.id)) return 'completed'
     return 'available'
   }
@@ -55,7 +48,6 @@ export default function App() {
 
   const selectedCourse = courses.find(c => c.id === selectedId)
   const completedCount = progress.completedExercises.length
-  const releasedCount = courses.filter(c => new Date() >= new Date(c.releaseDate)).length
 
   return (
     <div className={`app ${sidebarOpen ? 'sidebar-open' : ''}`}>
@@ -65,7 +57,6 @@ export default function App() {
         onSelect={setSelectedId}
         getCourseStatus={getCourseStatus}
         completedCount={completedCount}
-        releasedCount={releasedCount}
         isOpen={sidebarOpen}
       />
 
@@ -81,7 +72,6 @@ export default function App() {
         {selectedCourse ? (
           <CourseContent
             course={selectedCourse}
-            status={getCourseStatus(selectedCourse)}
             hintsUsed={progress.hintsUsed[selectedCourse.id] || 0}
             isCompleted={progress.completedExercises.includes(selectedCourse.id)}
             onComplete={completeExercise}
@@ -95,7 +85,6 @@ export default function App() {
             courses={courses}
             getCourseStatus={getCourseStatus}
             completedCount={completedCount}
-            releasedCount={releasedCount}
             onSelect={setSelectedId}
           />
         )}

@@ -2,6 +2,11 @@ import { useState } from 'react'
 
 // NOTE: Flag validation is intentionally client-side for this demo.
 // Move to a backend endpoint in production for real security.
+function normalizeAddr(s) {
+  // Accepte "0x1400016d0", "1400016D0", etc.
+  return s.trim().toLowerCase().replace(/^0x/, '')
+}
+
 function checkAnswer(exercise, input) {
   if (exercise.type === 'flag') {
     return input.trim().toUpperCase() === exercise.answer.toUpperCase()
@@ -156,6 +161,111 @@ function QuestionInput({ exercise, onSubmit }) {
   )
 }
 
+// ── Multi-question (type: 'multi') ───────────────────────────────
+function MultiInput({ exercise, onAllCorrect }) {
+  const questions = exercise.questions // [{ id, label, answer }]
+  const [inputs, setInputs] = useState(() => Object.fromEntries(questions.map(q => [q.id, ''])))
+  const [states, setStates] = useState(() => Object.fromEntries(questions.map(q => [q.id, 'idle'])))
+  const [correct, setCorrect] = useState(() => Object.fromEntries(questions.map(q => [q.id, false])))
+
+  const correctCount = Object.values(correct).filter(Boolean).length
+
+  function submit(q) {
+    if (correct[q.id]) return
+    const val = inputs[q.id]
+    const ok = normalizeAddr(val) === normalizeAddr(q.answer)
+    if (ok) {
+      setCorrect(prev => {
+        const next = { ...prev, [q.id]: true }
+        if (Object.values(next).every(Boolean)) {
+          setTimeout(onAllCorrect, 600)
+        }
+        return next
+      })
+    } else {
+      setStates(prev => ({ ...prev, [q.id]: 'error' }))
+      setTimeout(() => setStates(prev => ({ ...prev, [q.id]: 'idle' })), 1800)
+    }
+  }
+
+  function onKey(e, q) {
+    if (e.key === 'Enter') submit(q)
+  }
+
+  return (
+    <div className="flag-input-section">
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '18px' }}>
+        <div className="flag-input-label" style={{ marginBottom: 0 }}>Questions ({correctCount}/{questions.length})</div>
+        <div style={{ display: 'flex', gap: '6px' }}>
+          {questions.map(q => (
+            <div
+              key={q.id}
+              style={{
+                width: 10, height: 10, borderRadius: '50%',
+                background: correct[q.id] ? 'var(--green)' : 'var(--border-1)',
+                transition: 'background 0.3s',
+              }}
+            />
+          ))}
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+        {questions.map(q => (
+          <div
+            key={q.id}
+            style={{
+              border: `1px solid ${correct[q.id] ? 'var(--green-border)' : 'var(--border-1)'}`,
+              borderRadius: 'var(--radius)',
+              padding: '12px 14px',
+              background: correct[q.id] ? 'rgba(0,230,118,0.04)' : 'var(--bg-0)',
+              transition: 'border-color 0.3s, background 0.3s',
+            }}
+          >
+            <div style={{
+              fontSize: '12px',
+              color: correct[q.id] ? 'var(--green)' : 'var(--text-3)',
+              fontFamily: 'var(--font-mono)',
+              marginBottom: '8px',
+              display: 'flex',
+              justifyContent: 'space-between',
+            }}>
+              <span dangerouslySetInnerHTML={{ __html: q.label }} />
+              {correct[q.id] && <span style={{ color: 'var(--green)' }}>✓ Correct</span>}
+            </div>
+            <div className="flag-input-row">
+              <input
+                type="text"
+                className={`flag-input ${states[q.id] === 'error' ? 'error' : ''}`}
+                placeholder="0x140001234"
+                value={inputs[q.id]}
+                onChange={e => setInputs(prev => ({ ...prev, [q.id]: e.target.value }))}
+                onKeyDown={e => onKey(e, q)}
+                disabled={correct[q.id]}
+                spellCheck={false}
+                autoComplete="off"
+                style={{ flex: 1 }}
+              />
+              <button
+                className="btn btn-primary"
+                onClick={() => submit(q)}
+                disabled={correct[q.id] || !inputs[q.id].trim()}
+              >
+                {correct[q.id] ? '✓' : 'OK'}
+              </button>
+            </div>
+            {states[q.id] === 'error' && (
+              <div className="feedback-error" style={{ marginTop: '6px' }}>
+                ✕ Adresse incorrecte — vérifiez dans IDA (format 0x1400XXXXX).
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export default function Exercise({ exercise, courseId, hintsUsed, isCompleted, onComplete, onUseHint }) {
   const [submitted, setSubmitted] = useState(isCompleted)
 
@@ -164,6 +274,9 @@ export default function Exercise({ exercise, courseId, hintsUsed, isCompleted, o
     onComplete(courseId)
   }
 
+  const badgeLabel = exercise.type === 'flag' ? '⚑ FLAG' : exercise.type === 'multi' ? '⊞ MULTI' : '? QCM'
+  const badgeClass = exercise.type === 'flag' ? 'badge-flag' : exercise.type === 'multi' ? 'badge-flag' : 'badge-question'
+
   return (
     <div className="exercise-section">
       <div className="exercise-header">
@@ -171,8 +284,8 @@ export default function Exercise({ exercise, courseId, hintsUsed, isCompleted, o
           <div className="exercise-label">Exercice Pratique</div>
           <div className="exercise-title">{exercise.title}</div>
         </div>
-        <span className={`exercise-badge ${exercise.type === 'flag' ? 'badge-flag' : 'badge-question'}`}>
-          {exercise.type === 'flag' ? '⚑ FLAG' : '? QCM'}
+        <span className={`exercise-badge ${badgeClass}`}>
+          {badgeLabel}
         </span>
       </div>
 
@@ -182,8 +295,7 @@ export default function Exercise({ exercise, courseId, hintsUsed, isCompleted, o
             <div className="success-icon-wrap">✓</div>
             <div className="success-title">Exercice validé !</div>
             <p className="success-sub">
-              Excellent travail. Votre progression a été enregistrée.<br />
-              Le prochain cours sera disponible le mercredi suivant à 18h (heure de Paris).
+              Excellent travail. Votre progression a été enregistrée.
             </p>
             {exercise.explanation && (
               <div style={{
@@ -204,7 +316,6 @@ export default function Exercise({ exercise, courseId, hintsUsed, isCompleted, o
           </div>
         ) : (
           <>
-            {/* Scenario */}
             {exercise.scenario && (
               <div className="exercise-scenario">
                 <div className="exercise-scenario-label">Contexte</div>
@@ -212,13 +323,11 @@ export default function Exercise({ exercise, courseId, hintsUsed, isCompleted, o
               </div>
             )}
 
-            {/* Description */}
             <p
               className="exercise-desc"
               dangerouslySetInnerHTML={{ __html: exercise.description }}
             />
 
-            {/* Download file info */}
             {exercise.downloadFile && (
               <div className="exercise-file-info">
                 <span className="file-icon">◈</span>
@@ -230,7 +339,6 @@ export default function Exercise({ exercise, courseId, hintsUsed, isCompleted, o
               </div>
             )}
 
-            {/* Hints */}
             {exercise.hints && exercise.hints.length > 0 && (
               <HintSystem
                 hints={exercise.hints}
@@ -240,12 +348,14 @@ export default function Exercise({ exercise, courseId, hintsUsed, isCompleted, o
               />
             )}
 
-            {/* Answer input */}
             {exercise.type === 'flag' && (
               <FlagInput exercise={exercise} onSubmit={handleSubmit} />
             )}
             {exercise.type === 'question' && (
               <QuestionInput exercise={exercise} onSubmit={handleSubmit} />
+            )}
+            {exercise.type === 'multi' && (
+              <MultiInput exercise={exercise} onAllCorrect={handleSubmit} />
             )}
           </>
         )}

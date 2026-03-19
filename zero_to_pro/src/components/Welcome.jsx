@@ -1,15 +1,11 @@
-import Countdown from './Countdown'
-
 const STATUS_LABEL = {
   completed: { label: 'Terminé', color: 'var(--green)' },
   available: { label: 'Disponible', color: 'var(--blue)' },
-  'time-locked': { label: 'À venir', color: 'var(--yellow)' },
-  'exercise-locked': { label: 'Verrouillé', color: 'var(--text-3)' },
 }
 
-export default function Welcome({ courses, getCourseStatus, completedCount, releasedCount, onSelect }) {
-  const nextAvailable = courses.find(c => getCourseStatus(c) === 'available')
-  const nextLocked = courses.find(c => getCourseStatus(c) === 'time-locked')
+export default function Welcome({ courses, getCourseStatus, completedCount, onSelect }) {
+  const total = courses.filter(c => c.content?.length > 0).length
+  const nextAvailable = courses.find(c => getCourseStatus(c) === 'available' && c.content?.length > 0)
 
   const now = new Date()
   const startDate = new Date(courses[0].releaseDate)
@@ -22,15 +18,15 @@ export default function Welcome({ courses, getCourseStatus, completedCount, rele
         <div className="welcome-eyebrow">⬡ Formation continue</div>
         <h1 className="welcome-title">RE Academy</h1>
         <p className="welcome-desc">
-          Une formation progressive en reverse engineering. Chaque semaine, un nouveau cours et un exercice pratique.
-          Validez le flag pour débloquer la suite.
+          Une formation progressive en reverse engineering. Chaque cours couvre une technique d'analyse,
+          avec un exercice pratique sur un binaire réel pour valider vos acquis.
         </p>
       </div>
 
       {/* Stats */}
       <div className="stats-grid">
         <div className="stat-card">
-          <div className="stat-value">{completedCount}<span style={{ fontSize: '18px', color: 'var(--text-3)' }}>/{releasedCount}</span></div>
+          <div className="stat-value">{completedCount}<span style={{ fontSize: '18px', color: 'var(--text-3)' }}>/{total}</span></div>
           <div className="stat-label">Exercices terminés</div>
         </div>
         <div className="stat-card">
@@ -57,46 +53,32 @@ export default function Welcome({ courses, getCourseStatus, completedCount, rele
         </div>
       )}
 
-      {!nextAvailable && nextLocked && (
-        <div className="welcome-next">
-          <div className="welcome-next-label">⏳ Prochain cours</div>
-          <div className="welcome-next-title">{nextLocked.title}</div>
-          <div className="welcome-next-sub">Disponible dans :</div>
-          <Countdown targetDate={nextLocked.releaseDate} />
-          <p style={{ fontSize: '13px', color: 'var(--text-3)', marginTop: '10px' }}>
-            Nouveau cours chaque mercredi à 18h (heure de Paris)
-          </p>
-        </div>
-      )}
-
       {/* Course overview */}
       <div>
         <div className="overview-label">Tous les cours</div>
         <div className="courses-overview">
           {courses.map(course => {
             const status = getCourseStatus(course)
+            const hasContent = course.content?.length > 0
             const s = STATUS_LABEL[status]
-            const locked = status === 'time-locked' || status === 'exercise-locked'
 
             return (
               <div
                 key={course.id}
-                className={`overview-item ${locked ? 'ov-locked' : ''}`}
-                onClick={() => !locked && onSelect(course.id)}
+                className={`overview-item ${!hasContent ? 'ov-locked' : ''}`}
+                onClick={() => hasContent && onSelect(course.id)}
               >
                 <span className="ov-num" style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text-3)' }}>
                   {String(course.id).padStart(2, '0')}
                 </span>
                 <div className="ov-title">
                   {course.title}
-                  {course.content.length === 0 && (
+                  {!hasContent && (
                     <span style={{ marginLeft: '8px', fontSize: '11px', color: 'var(--text-3)' }}>• À paraître</span>
                   )}
                 </div>
                 <span className="ov-status" style={{ color: s?.color }}>
-                  {status === 'time-locked' ? (
-                    <Countdown targetDate={course.releaseDate} className="countdown-sm" />
-                  ) : s?.label}
+                  {hasContent ? s?.label : '—'}
                 </span>
               </div>
             )
