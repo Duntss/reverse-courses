@@ -1128,6 +1128,350 @@ La clé est passée en argument de la fonction Boucle 2 (KSA).`),
       ],
     },
   },
+
+  // ─────────────────────────────────────────────────────────────
+  // COURS 4
+  // ─────────────────────────────────────────────────────────────
+  {
+    id: 4,
+    title: 'Vulnérabilités Mémoire Offensives',
+    subtitle: 'OOB, UAF, Double Free, Type Confusion — anatomie et exploitation',
+    releaseDate: '2026-04-02T17:00:00Z',
+    duration: '90 min',
+    difficulty: 'Intermédiaire',
+    tags: ['Mémoire', 'OOB', 'UAF', 'Double Free', 'Type Confusion', 'Heap', 'Exploitation'],
+    content: [
+
+      // ── RAPPEL MÉMOIRE ────────────────────────────────────────
+      h2('Rappel mémoire'),
+      p("Avant d'attaquer les vulnérabilités, on pose le cadre. Toute vulnérabilité mémoire est une violation d'au moins un de ces cinq contrats fondamentaux :"),
+      table(
+        ['Contrat', 'Question clé', 'Violation typique'],
+        [
+          ['<strong>Ownership</strong>', 'Qui possède l\'objet ? Qui le libère ?', 'Double free, UAF — libération par le mauvais propriétaire'],
+          ['<strong>Lifetime</strong>', 'Pendant quelle période l\'objet est-il valide ?', 'UAF — usage après fin de vie de l\'objet'],
+          ['<strong>Bounds</strong>', 'Quelle est la taille valide de la zone ?', 'OOB — accès hors des bornes du buffer'],
+          ['<strong>Type validity</strong>', 'Le pointeur pointe-t-il vers un objet du bon type ?', 'Type confusion — cast incorrect entre types incompatibles'],
+          ['<strong>Time consistency</strong>', 'La condition vérifiée est-elle toujours vraie au moment de l\'usage ?', 'TOCTOU — état modifié entre vérification et usage'],
+        ]
+      ),
+      note('info', 'Vue d\'ensemble de l\'espace mémoire', "Un processus Windows 64-bit dispose d\'un espace mémoire divisé en zones : <strong>stack</strong> (variables locales, adresses de retour), <strong>heap</strong> (allocations dynamiques malloc/new), <strong>.text</strong> (code), <strong>.data/.bss</strong> (globales), <strong>.rdata</strong> (constantes). Chaque vulnérabilité a une zone de prédilection."),
+      hr(),
+
+      // ── OOB ───────────────────────────────────────────────────
+      h2('Out of Bounds (OOB)'),
+      p("Un accès OOB se produit quand un programme lit ou écrit <strong>hors des bornes d'un buffer</strong>. En C/C++, les tableaux ne connaissent pas leur propre taille — aucune vérification automatique n'existe."),
+
+      h3('Variantes'),
+      table(
+        ['Variante', 'Zone', 'Impact'],
+        [
+          ['<strong>OOB Read</strong>', 'Stack ou Heap', 'Fuite de données (adresses, secrets), bypass ASLR'],
+          ['<strong>OOB Write</strong>', 'Stack ou Heap', 'Corruption de variables voisines, métadonnées heap, pointeurs de retour'],
+          ['<strong>Stack Buffer Overflow</strong>', 'Stack', 'Écrasement de l\'adresse de retour → contrôle de RIP'],
+          ['<strong>Heap Buffer Overflow</strong>', 'Heap', 'Corruption des métadonnées heap → contrôle du heap layout'],
+          ['<strong>Index négatif</strong>', 'Stack ou Heap', 'Sous-dépassement — accès à des zones avant le buffer'],
+        ]
+      ),
+
+      h3('Pourquoi ça arrive'),
+      list([
+        'Un tableau ne sait pas se protéger — <code>arr[i]</code> en C ne vérifie jamais si <code>i</code> est dans les bornes',
+        'L\'<strong>écriture OOB</strong> peut altérer une variable voisine, un pointeur sauvegardé ou des métadonnées du heap manager',
+        'La <strong>lecture OOB</strong> peut divulguer des données sensibles ou produire un comportement incohérent permettant d\'inférer l\'état interne',
+      ]),
+
+      code('c', `// Exemple classique : stack buffer overflow
+void vuln(char *input) {
+    char buf[64];           // 64 octets sur la stack
+    strcpy(buf, input);     // PAS de vérification de taille !
+    // si strlen(input) > 63 → on écrase buf[64], buf[65]...
+    // à buf[72] on atteint l'adresse de retour sauvegardée → RIP
+}
+
+// Exemple OOB read
+int arr[10] = {0};
+printf("%d\\n", arr[15]);   // lit arr[15] → zone hors buffer
+                             // peut contenir une adresse heap/stack`),
+
+      note('danger', 'Impact réel', "Un stack buffer overflow sur l'adresse de retour permet un contrôle total de RIP — c'est la base de toute exploitation de dépassement de tampon. L'OOB read permet souvent de <strong>leaker des adresses</strong> pour bypasser l'ASLR avant d'exploiter une autre vulnérabilité."),
+      hr(),
+
+      // ── UAF ───────────────────────────────────────────────────
+      h2('Use After Free (UAF)'),
+      p("Un UAF se produit quand un programme continue d'utiliser un pointeur après avoir libéré (<code>free()</code>) la mémoire qu'il désignait. Le chunk libéré peut être réalloué par un autre objet — l'ancien pointeur pointe alors sur des données contrôlées par l'attaquant."),
+
+      h3('UAF Read'),
+      table(
+        ['Aspect', 'Détail'],
+        [
+          ['Comportement', 'PAS de crash direct — tu lis des données "fantômes"'],
+          ['Ce qui se passe', 'Métadonnées heap, ancien contenu, pointeurs internes du heap manager'],
+          ['Danger réel', '<strong>Information Leak</strong> — tu peux lire des adresses mémoire valides'],
+          ['Exploitation', 'Bypass ASLR → tu connais l\'emplacement du heap ou du code → base de TOUT exploit moderne'],
+        ]
+      ),
+
+      h3('UAF Write'),
+      table(
+        ['Aspect', 'Détail'],
+        [
+          ['Comportement', 'PAS de crash immédiat'],
+          ['Crash différé', 'Au prochain <code>malloc()</code>/<code>free()</code> quand le heap manager lit ses métadonnées corrompues'],
+          ['Danger', 'Heap corruption → contrôle du heap layout'],
+        ]
+      ),
+
+      h3('UAF Vtable (Write + Call)'),
+      table(
+        ['Aspect', 'Détail'],
+        [
+          ['Comportement', 'CRASH ou DÉTOURNEMENT de flux'],
+          ['Condition', 'Si tu contrôles ce qui est écrit dans le chunk réalloué, tu contrôles RIP'],
+          ['Impact', 'Remote Code Execution — le vtable pointer pointe vers du code attaquant'],
+        ]
+      ),
+
+      code('c', `// Scénario UAF classique
+Object *obj = new Object();   // alloc heap → obj->vtable = &Object_vtable
+delete obj;                   // free — le chunk est dans la free list
+                              // obj est toujours valide en tant que pointeur !
+
+// L'attaquant trigger une réallocation du même chunk
+char *controlled = malloc(sizeof(Object));  // même taille → même chunk !
+memcpy(controlled, attacker_data, sizeof(Object));
+// controlled occupe maintenant l'espace de l'ancien obj
+
+obj->method();  // UAF : déréférence obj->vtable → pointe vers attacker_data
+                // si attacker_data[0] = adresse shellcode → RCE`),
+
+      note('warning', 'Exploitation moderne', "Dans les navigateurs (Chrome, Firefox), les UAF sont parmi les vulnérabilités les plus exploitées. La technique <strong>heap spray</strong> consiste à allouer de nombreux objets contrôlés de la même taille pour maximiser la probabilité que le chunk libéré soit réalloué avec des données contrôlées."),
+      hr(),
+
+      // ── DOUBLE FREE ───────────────────────────────────────────
+      h2('Double Free'),
+      p("Un double free se produit quand <code>free()</code> est appelé deux fois sur le même pointeur. Le heap manager maintient une <strong>free list</strong> — insérer deux fois le même chunk la corrompt."),
+
+      h3('Double Free basique'),
+      code('c', `char *ptr = malloc(40);
+free(ptr);   // ✅ free #1 — OK, chunk inséré dans la free list
+free(ptr);   // 💥 free #2 — même chunk inséré une 2ème fois
+             // → crash immédiat sur Windows (heap corruption détectée)
+             // → corruption silencieuse sur certains allocators Linux`),
+
+      h3('Double Free via alias'),
+      code('c', `char *ptr1 = malloc(40);
+char *ptr2 = ptr1;       // alias ! même adresse
+
+free(ptr1);  // ✅ free #1 — OK
+// ... beaucoup de code entre les deux ...
+free(ptr2);  // 💥 free #2 — on a "oublié" que ptr2 == ptr1`),
+
+      p("L'alias est la cause la plus fréquente de double free dans du code réel — deux pointeurs sur le même objet, libérés indépendamment dans des chemins d'exécution différents (gestion d'erreurs, destructeurs complexes)."),
+
+      table(
+        ['Contexte', 'Comportement'],
+        [
+          ['Windows (LFH)', 'Crash immédiat — détection intégrée au heap manager'],
+          ['Linux glibc (avant hardening)', 'Corruption silencieuse de la free list → chunk réutilisable deux fois'],
+          ['Linux glibc (avec tcache)', 'Crash sur détection de double free dans tcache depuis glibc 2.29'],
+          ['Exploitation', 'Double free → chunk alloué deux fois → deux objets différents sur la même adresse mémoire'],
+        ]
+      ),
+
+      note('danger', 'Impact exploitation', "Un double free bien contrôlé permet d'obtenir <strong>deux allocations sur le même chunk</strong>. Si l'une est contrôlée par l'attaquant et l'autre par un objet critique (vtable, fonction pointer), c'est un chemin vers le RCE — même logique que l'UAF."),
+      hr(),
+
+      // ── TYPE CONFUSION ────────────────────────────────────────
+      h2('Type Confusion'),
+      p("Une type confusion se produit quand un programme alloue de la mémoire pour le <strong>type A</strong> mais l'utilise comme si c'était le <strong>type B</strong>. Les champs ne correspondent plus — lecture/écriture dans des zones inattendues."),
+
+      h3('1. Basic Cast'),
+      code('c', `typedef struct {
+    int id;          // offset +0 (4 bytes)
+    float salary;    // offset +4 (4 bytes)
+    char name[32];   // offset +8 (32 bytes)
+} Employee;          // total : 40 bytes
+
+typedef struct {
+    int id;          // offset +0 (4 bytes)
+    int age;         // offset +4 (4 bytes) — PAS un float !
+    char name[32];   // offset +8 (32 bytes)
+} Student;           // total : 40 bytes
+
+int main() {
+    Employee *emp = malloc(sizeof(Employee));
+    emp->id = 1337;
+    emp->salary = 4.2f;
+    strcpy(emp->name, "Alice");
+
+    // Type confusion : on cast Employee → Student
+    Student *stu = (Student *)emp;
+
+    // salary (float 4.2f) est LU comme un int !
+    printf("age = %d\\n", stu->age);
+    // Output : age = 1082130432  ← représentation binaire de 4.2f en int
+}`),
+
+      table(
+        ['Adresse', 'Employee (réel)', 'Student (interprété)', 'Résultat'],
+        [
+          ['+0', '0x00000539 (id=1337)', '0x00000539 (id=1337)', '✅ OK'],
+          ['+4', '0x40866666 (salary=4.2f)', '0x40866666 (age=???)', '❌ float lu comme int'],
+          ['+8', '"Alice..."', '"Alice..."', '✅ OK'],
+        ]
+      ),
+
+      h3('2. Union — Réinterprétation mémoire'),
+      code('c', `union Data {
+    int   i;
+    float f;
+    char  bytes[4];
+};
+
+int main() {
+    union Data d;
+    d.f = 1.0f;   // on écrit un float
+
+    printf("float  : %f\\n",   d.f);       // 1.000000
+    printf("int    : %d\\n",   d.i);       // 1065353216  💥 même bits, type différent
+    printf("bytes  : %02X %02X %02X %02X\\n",
+           d.bytes[0], d.bytes[1],
+           d.bytes[2], d.bytes[3]);        // 00 00 80 3F
+}`),
+
+      p("Une union partage la même zone mémoire entre tous ses membres. Dans un protocole réseau, si un attaquant peut forcer l'interprétation d'un <code>UserPacket</code> en <code>AdminPacket</code>, il accède à des commandes privilégiées sans authentification."),
+
+      h3('3. Downcast — Mauvais cast dans une hiérarchie C++'),
+      code('cpp', `class Animal {
+public:
+    int  age;           // offset +0
+    char name[32];      // offset +4
+    virtual void speak() { printf("...\\n"); }
+};
+
+class Dog : public Animal {
+public:
+    int  nb_tricks;     // offset +40  ← champ supplémentaire (int)
+    void speak() override { printf("Woof!\\n"); }
+};
+
+class Cat : public Animal {
+public:
+    bool indoor;        // offset +40  ← champ différent (bool)
+    void speak() override { printf("Meow!\\n"); }
+};
+
+int main() {
+    Animal *a = new Cat();   // un Cat déguisé en Animal
+
+    // DOWNCAST INCORRECT : on dit que c'est un Dog alors que c'est un Cat
+    Dog *d = (Dog *)a;
+
+    d->nb_tricks = 5;
+    // ↑ on écrit dans Cat::indoor (offset +40)
+    //   on écrase un booléen avec la valeur 5 → comportement indéfini !
+}`),
+
+      table(
+        ['Approche', 'Sécurité', 'Comportement'],
+        [
+          ['<code>(Dog *)animal_ptr</code>', '❌ Aveugle', 'Compile sans erreur, comportement indéfini au runtime'],
+          ['<code>dynamic_cast&lt;Dog*&gt;(animal_ptr)</code>', '✅ Sûr', 'Vérifie le type via RTTI au runtime, retourne nullptr si incorrect'],
+        ]
+      ),
+
+      h3('4. Vtable Confusion'),
+      code('cpp', `class Button {
+public:
+    virtual void onClick() { printf("Click!\\n"); }
+    virtual void onHover() { printf("Hover!\\n"); }
+    int color;
+};
+
+class TextBox {
+public:
+    virtual void onClick() { printf("TextBox click!\\n"); }
+    virtual void getText()  { printf("Getting text...\\n"); }
+    int color;
+    char *buffer;     // ← champ supplémentaire à offset +12
+};
+
+void process(Button *btn) {
+    btn->onClick();   // appel via vtable — mais laquelle ?
+    btn->onHover();   // cherche le 2ème pointeur dans la vtable
+}
+
+// Si un attaquant passe un TextBox* là où Button* est attendu :
+// → btn->onHover() → cherche vtable_TextBox[1] → appelle getText()
+// → arguments faux, offsets faux → crash ou RCE`),
+
+      p("La vtable confusion est la forme la plus grave de type confusion en C++ : si l'attaquant contrôle le vtable pointer (via UAF ou OOB write), il contrôle quel pointeur de fonction est appelé — chemin direct vers RCE."),
+
+      table(
+        ['Type Confusion', 'Vecteur', 'Impact maximal'],
+        [
+          ['Basic cast', 'Cast C explicite sans vérification', 'Lecture/écriture champs incorrects'],
+          ['Union abuse', 'Choix du membre lu sur une union partagée', 'Élévation de privilèges (user → admin)'],
+          ['Downcast C++', 'static_cast/C-cast dans hiérarchie polymorphe', 'Corruption mémoire ciblée'],
+          ['Vtable confusion', 'Pointeur de vtable corrompu ou mauvais type', 'Remote Code Execution'],
+        ]
+      ),
+
+      note('info', 'Vulnérabilités réelles', "Les type confusion en C++ sont fréquentes dans les moteurs JavaScript des navigateurs (V8, SpiderMonkey). Les objets JS sont implémentés en C++ avec des hiérarchies de classes complexes — un mauvais cast permet de lire/écrire hors des bornes de l'objet → information leak + RCE."),
+      hr(),
+
+      // ── RÉCAP ─────────────────────────────────────────────────
+      h2('Récapitulatif — Famille des vulnérabilités mémoire'),
+      table(
+        ['Vulnérabilité', 'Contrat violé', 'Impact primitif', 'Impact exploitation'],
+        [
+          ['OOB Read', 'Bounds', 'Fuite mémoire', 'Bypass ASLR'],
+          ['OOB Write', 'Bounds', 'Corruption mémoire', 'Contrôle de RIP (stack) ou heap layout'],
+          ['UAF Read', 'Lifetime', 'Fuite mémoire', 'Bypass ASLR'],
+          ['UAF Write/Vtable', 'Lifetime', 'Corruption heap', 'RCE via vtable hijack'],
+          ['Double Free', 'Ownership', 'Corruption free list', 'Double allocation → même effet UAF'],
+          ['Type Confusion', 'Type validity', 'Champs incorrects', 'RCE via vtable confusion'],
+        ]
+      ),
+
+      note('success', 'Ordre d\'exploitation typique', "La plupart des exploits modernes combinent deux primitives : <strong>1. Information Leak</strong> (OOB read ou UAF read pour bypasser ASLR) → <strong>2. Write primitive</strong> (OOB write, UAF write ou vtable confusion pour contrôler RIP). Une seule vulnérabilité suffit rarement — l'art est de les chaîner."),
+    ],
+
+    exercise: {
+      type: 'multi',
+      title: 'Quiz — Identifier les vulnérabilités mémoire',
+      scenario: "On vous soumet des extraits de code C/C++. Votre mission : identifier la vulnérabilité présente et répondre aux questions. Les réponses sont des mots-clés en minuscules.",
+      description: "Pour chaque question, répondez avec le nom exact de la vulnérabilité (insensible à la casse). Référez-vous au cours pour les définitions.",
+      questions: [
+        {
+          id: 'q1',
+          label: 'Q1 — <code>char buf[8]; strcpy(buf, argv[1]);</code> — Quel type de vulnérabilité OOB est présent ?',
+          answer: 'stack buffer overflow',
+        },
+        {
+          id: 'q2',
+          label: 'Q2 — Un pointeur est utilisé après <code>free()</code> pour appeler une méthode virtuelle. Quel est le nom exact de ce sous-type d\'UAF ?',
+          answer: 'uaf vtable',
+        },
+        {
+          id: 'q3',
+          label: 'Q3 — Deux pointeurs <code>ptr1</code> et <code>ptr2</code> pointent sur le même chunk. Les deux sont libérés séparément. Quel est le nom de cette vulnérabilité ?',
+          answer: 'double free',
+        },
+        {
+          id: 'q4',
+          label: 'Q4 — Un objet <code>Cat*</code> est casté en <code>Dog*</code> sans vérification RTTI. Quel contrat mémoire fondamental est violé ?',
+          answer: 'type validity',
+        },
+        {
+          id: 'q5',
+          label: 'Q5 — Un OOB read sur le heap permet de lire des adresses de fonctions. Quel mécanisme de sécurité cela permet-il de contourner ?',
+          answer: 'aslr',
+        },
+      ],
+    },
+  },
 ]
 
 export default courses
